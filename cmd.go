@@ -22,12 +22,22 @@ func commands() []*cli.Command {
 	return []*cli.Command{
 		{
 			Name:  "diff",
-			Usage: "Render every host and diff it against the golden files in rendered/",
+			Usage: "Render every host and diff it against the golden files in rendered/, or plan one live host with --host",
 			Description: `Run from the root of the desired-state repo. Exits non-zero when a host's
-   rendered files differ from rendered/<host>; --update rewrites them.`,
+   rendered files differ from rendered/<host>; --update rewrites them.
+
+   With --host <host> it shows what the next pull will change on that host
+   instead: over your ssh (and sudo, which may ask for the password), the
+   host's own agent fetches its ref, verifies it as a pull does and prints
+   the plan against the live system, without applying anything or writing
+   its state or metrics. --ref plans another branch, e.g. a PR's, the way the
+   host would if it followed it (signed, and a descendant of what it runs).`,
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "dir", Value: ".", Usage: "clone of the desired-state repo"},
 				&cli.BoolFlag{Name: "update", Usage: "rewrite the golden files instead of diffing"},
+				&cli.StringFlag{Name: "host", Usage: "plan this live host over ssh instead of diffing the golden files"},
+				&cli.StringFlag{Name: "ref", Usage: "with --host: the branch to plan (default: the one the host follows)"},
+				&cli.StringFlag{Name: "ssh", Usage: "with --host: ssh destination (default: the address in the host file, else the host name)"},
 			},
 			Action: infraDiff,
 		},
@@ -311,6 +321,22 @@ func askYes(prompt string) bool { return ask(stdinLines, os.Stdout, prompt, true
 
 func infraDiff(c *cli.Context) error {
 	dir := c.String("dir")
+	if host := c.String("host"); host != "" {
+		if c.Bool("update") {
+			return cli.Exit("--update rewrites the golden files; it does not go with --host", 2)
+		}
+		return infra.HostDiff(c.Context, infra.HostDiffConfig{
+			Dir:    dir,
+			Host:   host,
+			Target: c.String("ssh"),
+			Ref:    c.String("ref"),
+			Local:  infra.ExecLocal(),
+			Out:    os.Stdout,
+		})
+	}
+	if c.IsSet("ref") || c.IsSet("ssh") {
+		return cli.Exit("--ref and --ssh go with --host", 2)
+	}
 	fsys, closeRepo, err := infra.OpenRepo(dir)
 	if err != nil {
 		return err
