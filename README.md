@@ -39,7 +39,7 @@ A typical rollout: a standby host follows `main` and gets every change first, an
 
 1. Edit a module or a host, then run `infrafier diff` in the repo. It prints the change as unified diffs of the rendered files, plus the restarts and reloads it would trigger.
 2. Run `infrafier diff --update` and commit `rendered/` with the change. Run `infrafier diff` in CI: it fails while `rendered/` is stale, or still holds a host that has no host file (`--update` removes it), so a PR always shows the real files.
-3. On a host, `infrafier pull --ref <ref> --dry-run` shows the plan against the live system without changing anything.
+3. From your machine, `infrafier diff --host <host>` shows what the host's next pull will change: over your ssh and sudo, the host's own agent fetches and verifies its ref and prints the plan against the live system (diffs of the files, then the actions), without applying anything or writing its state or metrics. Add `--ref <branch>` to plan a PR's branch before merging it. On the host itself this is `infrafier pull --ref <ref> --dry-run`.
 
 ### Modules
 
