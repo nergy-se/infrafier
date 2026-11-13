@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -382,7 +383,7 @@ func (readOnlySystem) Mkdir(p string, _ fs.FileMode, _, _ string) error {
 func (readOnlySystem) RemoveAll(p string) error  { return errReadOnly("remove", p) }
 func (readOnlySystem) Symlink(_, p string) error { return errReadOnly("symlink", p) }
 func (readOnlySystem) Rename(_, p string) error  { return errReadOnly("rename", p) }
-func (readOnlySystem) Fetch(_ context.Context, url string) (io.ReadCloser, error) {
+func (readOnlySystem) Fetch(_ context.Context, url string, _, _ http.Header) (io.ReadCloser, error) {
 	return nil, errReadOnly("fetch", url)
 }
 

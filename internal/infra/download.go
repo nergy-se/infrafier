@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"net/http"
 	"path"
 	"strings"
 	"time"
@@ -486,9 +487,20 @@ func fetchDownload(ctx context.Context, sys System, d *Download, want map[string
 	if err := ensureCacheDirs(sys); err != nil {
 		return nil, err
 	}
+	if d.placeholders {
+		// Never send a placeholder as a credential.
+		return nil, fmt.Errorf("%s: rendered without this host's secrets, so its secretHeaders are placeholders; only a pull on the host fetches it", d.URL)
+	}
+	var header http.Header
+	if len(d.Headers) > 0 {
+		header = http.Header{}
+		for k, v := range d.Headers {
+			header.Set(k, v)
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
 	defer cancel()
-	body, err := sys.Fetch(ctx, d.URL)
+	body, err := sys.Fetch(ctx, d.URL, header, d.secretValues)
 	if err != nil {
 		return nil, err
 	}

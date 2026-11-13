@@ -50,8 +50,10 @@ type System interface {
 	WriteFileFrom(path string, r io.Reader, mode fs.FileMode, owner, group string) error
 	// Open opens a regular file for reading, never through a symlink.
 	Open(path string) (io.ReadCloser, error)
-	// Fetch GETs an https URL. A status other than 200 is an error.
-	Fetch(ctx context.Context, url string) (io.ReadCloser, error)
+	// Fetch GETs an https URL with header and secret added to the request. A
+	// status other than 200 is an error. The secret headers are dropped on a
+	// redirect to another host, and never appear in an error.
+	Fetch(ctx context.Context, url string, header, secret http.Header) (io.ReadCloser, error)
 	// Run runs argv and returns its standard output; stderr only goes into
 	// the error, so a warning never ends up in a state that is parsed (e.g.
 	// `systemctl is-active`). A non-zero exit is an error that wraps one with
@@ -450,7 +452,7 @@ func httpsRedirectsOnly(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-func (o *OS) Fetch(ctx context.Context, url string) (io.ReadCloser, error) {
+func (o *OS) Fetch(ctx context.Context, url string, header, secret http.Header) (io.ReadCloser, error) {
 	if !strings.HasPrefix(url, "https://") {
 		return nil, fmt.Errorf("%s: only https URLs are fetched", url)
 	}
@@ -458,10 +460,19 @@ func (o *OS) Fetch(ctx context.Context, url string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
+	for k, vs := range header {
+		req.Header[k] = vs
+	}
+	for k, vs := range secret {
+		req.Header[k] = vs
+	}
 	req.Header.Set("User-Agent", agentName)
 	c := o.HTTP
 	if c == nil {
 		c = defaultHTTP
+	}
+	if len(secret) > 0 {
+		c = dropSecretsOffHost(c, secret)
 	}
 	resp, err := c.Do(req)
 	if err != nil {
@@ -477,6 +488,35 @@ func (o *OS) Fetch(ctx context.Context, url string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
 	return resp.Body, nil
+}
+
+// dropSecretsOffHost is c with a redirect policy that also removes the
+// secret headers from a redirect that leaves the first request's host, or
+// follows one that did. net/http does that only for Authorization, Cookie
+// and WWW-Authenticate, and only between domains, so a custom header (an
+// X-Api-Key) would reach a signed download URL on a CDN, and its logs.
+func dropSecretsOffHost(c *http.Client, secret http.Header) *http.Client {
+	cc := *c
+	next := c.CheckRedirect
+	cc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if next != nil {
+			if err := next(req, via); err != nil {
+				return err
+			}
+		} else if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		for _, r := range append(via[1:], req) {
+			if r.URL.Host != via[0].URL.Host {
+				for k := range secret {
+					req.Header.Del(k)
+				}
+				break
+			}
+		}
+		return nil
+	}
+	return &cc
 }
 
 func (o *OS) Rename(oldpath, newpath string) error {

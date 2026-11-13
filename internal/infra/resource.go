@@ -16,6 +16,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"maps"
+	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -120,6 +123,19 @@ type Download struct {
 	// the run fails.
 	PreInstallCheck []string
 	KeepPrevious    bool
+	// Headers are sent with the request, and shown in golden files.
+	Headers map[string]string
+	// SecretHeaders maps a header to the host secret that holds its value,
+	// e.g. Authorization → a secret "Bearer github_pat_…", for a release
+	// asset of a private repository. Golden files and plans show the header
+	// and the secret's name, never the value, and Fetch drops the header on
+	// a redirect to another host (a signed download URL needs none).
+	SecretHeaders map[string]string
+	// secretValues are the values of SecretHeaders, read from the host's
+	// secrets at render. placeholders: rendered without secrets (diff, CI),
+	// so secretValues are placeholders and the download refuses to fetch.
+	secretValues http.Header
+	placeholders bool
 	// leavePrevious: this run does not replace .prev, which stays declared
 	// (a fallback run, see PullConfig.Fallback).
 	leavePrevious bool
@@ -277,6 +293,13 @@ func describe(r Resource) string {
 		}
 		if len(r.PreInstallCheck) > 0 {
 			s += "\n  pre-install check: " + strings.Join(r.PreInstallCheck, " ")
+		}
+		// Quoted, so a value never holds the "→" of a file line.
+		for _, h := range slices.Sorted(maps.Keys(r.Headers)) {
+			s += fmt.Sprintf("\n  header %s: %q", h, r.Headers[h])
+		}
+		for _, h := range slices.Sorted(maps.Keys(r.SecretHeaders)) {
+			s += fmt.Sprintf("\n  header %s: secret %q", h, r.SecretHeaders[h])
 		}
 		return s + describeOnChange(r.OnChange)
 	case *User:
