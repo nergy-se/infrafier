@@ -245,7 +245,7 @@ func TestDownloadCorruptBlobIsFetchedAgain(t *testing.T) {
 
 func TestFetchOnlyHTTPS(t *testing.T) {
 	sys, _ := newTestSystem(t)
-	_, err := sys.Fetch(context.Background(), "http://example.com/x")
+	_, err := sys.Fetch(context.Background(), "http://example.com/x", nil, nil)
 	assert.ErrorContains(t, err, "only https")
 }
 
@@ -768,13 +768,13 @@ func TestFetchRefusesARedirectToHTTP(t *testing.T) {
 	t.Cleanup(tls.Close)
 
 	sys.HTTP = tls.Client() // the default policy follows it; Fetch still refuses
-	_, err := sys.Fetch(context.Background(), tls.URL)
+	_, err := sys.Fetch(context.Background(), tls.URL, nil, nil)
 	assert.ErrorContains(t, err, "redirected to "+plain.URL+"/x: only https")
 
 	c := tls.Client()
 	c.CheckRedirect = httpsRedirectsOnly
 	sys.HTTP = c
-	_, err = sys.Fetch(context.Background(), tls.URL)
+	_, err = sys.Fetch(context.Background(), tls.URL, nil, nil)
 	assert.ErrorContains(t, err, "only https")
 }
 

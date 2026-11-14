@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net/http"
 	"net/netip"
 	"path"
 	"regexp"
@@ -71,6 +72,11 @@ type downloadSpec struct {
 	// PreInstallCheck and KeepPrevious: see Download.
 	PreInstallCheck []string `json:"preInstallCheck"`
 	KeepPrevious    bool     `json:"keepPrevious"`
+	// Headers are sent as they are, and shown in golden files.
+	// SecretHeaders maps a header to the name of a host secret holding its
+	// whole value (e.g. "Bearer …"); see Download.
+	Headers       map[string]string `json:"headers"`
+	SecretHeaders map[string]string `json:"secretHeaders"`
 }
 
 type userSpec struct {
@@ -298,7 +304,7 @@ func (rs resourceSpec) resource(fsys fs.FS, dir string, data templateData, secre
 	}
 	switch {
 	case rs.Download != nil:
-		return rs.Download.resource()
+		return rs.Download.resource(secrets)
 	case rs.User != nil:
 		return rs.User.resource()
 	case rs.File != nil:
@@ -398,7 +404,7 @@ func (f *fileSpec) resource(fsys fs.FS, dir string, data templateData, secrets S
 
 var sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-func (d *downloadSpec) resource() (Resource, error) {
+func (d *downloadSpec) resource(secrets SecretSource) (Resource, error) {
 	if !strings.HasPrefix(d.URL, "https://") {
 		return nil, fmt.Errorf("download %q: url must be https", d.URL)
 	}
@@ -439,6 +445,9 @@ func (d *downloadSpec) resource() (Resource, error) {
 		out.PreInstallCheck = d.PreInstallCheck
 	}
 	out.KeepPrevious = d.KeepPrevious
+	if err := d.headers(out, secrets); err != nil {
+		return nil, fmt.Errorf("download %s: %w", d.URL, err)
+	}
 	var err error
 	if out.Mode, err = parseMode(d.Mode, 0o755); err != nil {
 		return nil, fmt.Errorf("download %s: %w", d.URL, err)
@@ -447,6 +456,122 @@ func (d *downloadSpec) resource() (Resource, error) {
 		return nil, fmt.Errorf("download %s: %w", d.URL, err)
 	}
 	return out, nil
+}
+
+// headerNameRe is an HTTP field name (RFC 9110 5.1, a token).
+var headerNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+
+// refusedHeaders cannot be set by a download, with why. All of them pass
+// render and would only fail on the host, at the fetch.
+var refusedHeaders = map[string]string{
+	"Host":              "it is set by " + agentName + " from the URL",
+	"User-Agent":        "it is set by " + agentName,
+	"Connection":        "it is set by net/http",
+	"Content-Length":    "it is set by net/http",
+	"Transfer-Encoding": "it is set by net/http",
+	"Te":                "it is set by net/http",
+	"Expect":            "a GET has no body to continue",
+	// net/http only decompresses a response itself when it asked for
+	// gzip; with the header set the pin is checked against the
+	// compressed bytes and fails.
+	"Accept-Encoding": "net/http would then hand on a compressed body, which fails the pin",
+	// Fetch takes only a 200 with the whole file.
+	"Range":               "Fetch takes only a 200 with the whole file",
+	"If-Range":            "Fetch takes only a 200 with the whole file",
+	"If-Match":            "Fetch takes only a 200 with the whole file",
+	"If-None-Match":       "Fetch takes only a 200 with the whole file",
+	"If-Modified-Since":   "Fetch takes only a 200 with the whole file",
+	"If-Unmodified-Since": "Fetch takes only a 200 with the whole file",
+	// For an https URL net/http sends request headers to the origin
+	// inside the proxy's tunnel, so the proxy never sees it and the
+	// origin gets the proxy's credential. A proxy's credential goes in
+	// HTTPS_PROXY's userinfo.
+	"Proxy-Authorization": "it would reach the server, not the proxy; set the proxy's credential in HTTPS_PROXY",
+}
+
+// credentialHeaders carry credentials, so they may only be secretHeaders:
+// as headers they would be in golden files and in git.
+var credentialHeaders = map[string]bool{"Authorization": true, "Cookie": true}
+
+// headers checks d's headers and secretHeaders and puts them in out, with
+// each secret's value read from secrets, or its placeholder when secrets is
+// nil (diff, CI, bootstrap), in which case out refuses to fetch. An error
+// names the header and the secret, never a value.
+func (d *downloadSpec) headers(out *Download, secrets SecretSource) error {
+	seen := map[string]bool{}
+	name := func(field, h string) (string, error) {
+		if !headerNameRe.MatchString(h) {
+			return "", fmt.Errorf("%s: %q is not a header name", field, h)
+		}
+		c := http.CanonicalHeaderKey(h)
+		if why, ok := refusedHeaders[c]; ok {
+			return "", fmt.Errorf("%s: %s cannot be set by a download: %s", field, c, why)
+		}
+		if seen[c] {
+			return "", fmt.Errorf("%s: %s is given twice (header names are case-insensitive, and one may be in headers and secretHeaders)", field, c)
+		}
+		seen[c] = true
+		return c, nil
+	}
+	for _, h := range slices.Sorted(maps.Keys(d.Headers)) {
+		c, err := name("headers", h)
+		if err != nil {
+			return err
+		}
+		if credentialHeaders[c] {
+			return fmt.Errorf("headers: %s carries a credential; put it in secretHeaders, as the name of a host secret", c)
+		}
+		if !validHeaderValue(d.Headers[h]) {
+			return fmt.Errorf("headers: %s: the value has a control character (a line break?)", c)
+		}
+		if out.Headers == nil {
+			out.Headers = map[string]string{}
+		}
+		out.Headers[c] = d.Headers[h]
+	}
+	for _, h := range slices.Sorted(maps.Keys(d.SecretHeaders)) {
+		c, err := name("secretHeaders", h)
+		if err != nil {
+			return err
+		}
+		secret := d.SecretHeaders[h]
+		if !secretNameRe.MatchString(secret) {
+			return fmt.Errorf("secretHeaders: %s: %w", c, errBadSecretName)
+		}
+		v := secretPlaceholderValue(secret)
+		if secrets == nil {
+			out.placeholders = true
+		} else {
+			// The name is the module's own string, never a value, so
+			// the error may show it.
+			if v, err = secrets.Secret(secret); err != nil {
+				return fmt.Errorf("secretHeaders: %s: %w", c, err)
+			}
+			if !validHeaderValue(v) {
+				return fmt.Errorf("secretHeaders: %s: secret %q is not a valid header value: it is empty or has a control character such as a line break (value not shown)", c, secret)
+			}
+		}
+		if out.SecretHeaders == nil {
+			out.SecretHeaders, out.secretValues = map[string]string{}, http.Header{}
+		}
+		out.SecretHeaders[c] = secret
+		out.secretValues.Set(c, v)
+	}
+	return nil
+}
+
+// validHeaderValue: no control characters but tab (RFC 9110 5.5), not
+// empty, and no leading or trailing whitespace, which a server would strip.
+func validHeaderValue(v string) bool {
+	if v == "" || strings.TrimSpace(v) != v {
+		return false
+	}
+	for _, r := range v {
+		if (r < 0x20 && r != '\t') || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // systemNameRe is what useradd and groupadd take on Debian, without the

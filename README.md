@@ -88,11 +88,11 @@ function(host) {
 | `package` | the Debian package name; a virtual one (`mail-transport-agent`) is an error, name its provider |
 | `unit` | `name`, `enabled`, `active`; names without a type get `.service`, as systemctl does |
 | `user` | `name`, `home` (not created; `/nonexistent` by default), `groups` (must exist); a system user with its own group and no login shell |
-| `download` | `url`, `sha256`, one of `path`/`extract`, `mode` (default 0755), `owner`, `group`, `onChange`, `preInstallCheck`, `keepPrevious` |
+| `download` | `url`, `sha256`, one of `path`/`extract`, `mode` (default 0755), `owner`, `group`, `onChange`, `preInstallCheck`, `keepPrevious`, `headers`, `secretHeaders` (see "Downloads that need a credential") |
 | `command` | `name`, `check`, `run`, `secret` |
 | action | one of `restart`/`reload`/`try-restart` (a unit), `check` (a command) |
 
-What a file evaluates to is decoded strictly: an unknown or misspelled field (`Path` for `path`) and a number where a string belongs are errors that name the place, e.g. `resources[0].file.onChange[0]: field Restart not found`. Evaluation sees only the fetched commit: no environment, no external variables, and no secrets, which only a file's template reads. Two resources on one path are an error, and so is a resource owned by a `user` declared after it.
+What a file evaluates to is decoded strictly: an unknown or misspelled field (`Path` for `path`) and a number where a string belongs are errors that name the place, e.g. `resources[0].file.onChange[0]: field Restart not found`. Evaluation sees only the fetched commit: no environment, no external variables, and no secrets, which only a file's template reads (and a download's `secretHeaders` names). Two resources on one path are an error, and so is a resource owned by a `user` declared after it.
 
 Templates get `.Host` (`.Host.Name`, `.Host.Ref`, `.Host.Address`) and `.Vars`. A missing key is an error, never an empty string in a config file.
 
@@ -141,6 +141,26 @@ A template reads a value with `{{secret "name"}}`, and only in a file with `secr
 - **A host's recipient:** `bootstrap` creates the host's identity and prints the line to add when the recipients file doesn't list it yet. Only post-quantum `age1pq1…` recipients are taken, the kind keygen and bootstrap make.
 - **Editing:** `infrafier secrets edit <host>` decrypts the file into vim or nvim on a tmpfs, with swap, undo and backup files kept off, and encrypts it again when you save. A file that isn't valid YAML of strings is not saved, and you get to edit it again. Then `infrafier diff --update` and commit both.
 - **Changing who can decrypt:** edit the recipients file, then `infrafier secrets rekey <host>`. That only changes who can decrypt from then on: git history keeps every earlier file, which a removed recipient still decrypts. When a recipient is removed because its key may be known, change the values themselves too, at their source.
+
+### Downloads that need a credential
+
+A release asset of a private GitHub repository can't be fetched from its `releases/download/…` link with a token; the API's asset URL can. The token comes from a host secret through `secretHeaders`, which maps a header to the name of the secret holding its whole value:
+
+```jsonnet
+{ download: {
+  url: 'https://api.github.com/repos/<owner>/<repo>/releases/assets/<id>',  // gh release view --json assets
+  sha256: '…',
+  path: '/usr/local/bin/apiserver',
+  headers: { Accept: 'application/octet-stream' },   // the asset, not its JSON
+  secretHeaders: { Authorization: 'dist-token' },    // the secret: "Bearer github_pat_…"
+} }
+```
+
+- `headers` are sent as they are and shown in `rendered/`; `Authorization` and `Cookie` can only be `secretHeaders`. Neither may set `Host`, `User-Agent` or the other headers infrafier or Go set, `Accept-Encoding` (Go would then pass on a compressed body, which fails the pin), `Range` or the `If-*` headers (only a 200 with the whole file is taken), or `Proxy-Authorization` (for an https URL it would reach the server, not the proxy; give the proxy's credential in `HTTPS_PROXY`).
+- An error never shows a header's value, nor the query of a URL it was redirected to, which is often a signature.
+- `rendered/` and plans show a secret header as its name and the secret's (`header Authorization: secret "dist-token"`), never the value, and so does every error. A download rendered without secrets (diff, CI) never fetches, so a placeholder is never sent.
+- A secret header is dropped on any redirect that leaves the URL's host: GitHub answers with a redirect to a signed URL on another host, which needs none. Go's own client keeps a custom header (an `X-Api-Key`) there, and `Authorization` too when only the port differs.
+- Give the token the least it needs: a fine-grained token with `Contents: read` on that one repository, one per host, so each can be revoked alone. The sha256 pin still decides what is installed: a replaced asset gets a new id, and changed content fails the pin.
 
 `rendered/<host>/_resources.txt` ends with a sha256 of the host's secrets file, so `infrafier diff` lists the restarts of every file that reads secrets when it changes.
 
