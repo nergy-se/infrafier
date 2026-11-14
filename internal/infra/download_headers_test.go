@@ -61,6 +61,18 @@ func TestDownloadSecretHeaderRender(t *testing.T) {
 	}
 }
 
+// A header value with a "→" must not read as a file line in a golden
+// diff, or changing only that header would run the download's onChange.
+func TestDownloadHeaderWithArrowIsNoFileLine(t *testing.T) {
+	d := &Download{URL: "https://example.com/a", SHA256: strings.Repeat("0", 64), Mode: 0o755, Owner: "root", Group: "root",
+		Files:   []DownloadFile{{Path: "/usr/local/bin/a"}},
+		Headers: map[string]string{"X-Note": "build → /tmp/tool"}}
+	desc := describe(d)
+	assert.Contains(t, desc, `header X-Note: "build \u2192 /tmp/tool"`)
+	assert.Equal(t, []string{"/usr/local/bin/a"}, downloadPaths(desc))
+	assert.Len(t, downloadInstalls(desc), 1)
+}
+
 func TestDownloadHeaderErrors(t *testing.T) {
 	for name, tc := range map[string]struct {
 		download string

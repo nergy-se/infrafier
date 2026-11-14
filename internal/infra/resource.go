@@ -294,12 +294,14 @@ func describe(r Resource) string {
 		if len(r.PreInstallCheck) > 0 {
 			s += "\n  pre-install check: " + strings.Join(r.PreInstallCheck, " ")
 		}
-		// Quoted, so a value never holds the "→" of a file line.
+		// Quoted with %+q, which escapes all non-ASCII as well, so a
+		// value never holds the "→" of a file line (%q keeps printable
+		// Unicode as it is).
 		for _, h := range slices.Sorted(maps.Keys(r.Headers)) {
-			s += fmt.Sprintf("\n  header %s: %q", h, r.Headers[h])
+			s += fmt.Sprintf("\n  header %s: %+q", h, r.Headers[h])
 		}
 		for _, h := range slices.Sorted(maps.Keys(r.SecretHeaders)) {
-			s += fmt.Sprintf("\n  header %s: secret %q", h, r.SecretHeaders[h])
+			s += fmt.Sprintf("\n  header %s: secret %+q", h, r.SecretHeaders[h])
 		}
 		return s + describeOnChange(r.OnChange)
 	case *User:
