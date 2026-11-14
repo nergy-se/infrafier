@@ -156,7 +156,8 @@ A release asset of a private GitHub repository can't be fetched from its `releas
 } }
 ```
 
-- `headers` are sent as they are and shown in `rendered/`; `Authorization`, `Proxy-Authorization` and `Cookie` can only be `secretHeaders`. `Host`, `User-Agent` and the other headers infrafier or Go set can be neither.
+- `headers` are sent as they are and shown in `rendered/`; `Authorization` and `Cookie` can only be `secretHeaders`. Neither may set `Host`, `User-Agent` or the other headers infrafier or Go set, `Accept-Encoding` (Go would then pass on a compressed body, which fails the pin), `Range` or the `If-*` headers (only a 200 with the whole file is taken), or `Proxy-Authorization` (for an https URL it would reach the server, not the proxy; give the proxy's credential in `HTTPS_PROXY`).
+- An error never shows a header's value, nor the query of a URL it was redirected to, which is often a signature.
 - `rendered/` and plans show a secret header as its name and the secret's (`header Authorization: secret "dist-token"`), never the value, and so does every error. A download rendered without secrets (diff, CI) never fetches, so a placeholder is never sent.
 - A secret header is dropped on any redirect that leaves the URL's host: GitHub answers with a redirect to a signed URL on another host, which needs none. Go's own client keeps a custom header (an `X-Api-Key`) there, and `Authorization` too when only the port differs.
 - Give the token the least it needs: a fine-grained token with `Contents: read` on that one repository, one per host, so each can be revoked alone. The sha256 pin still decides what is installed: a replaced asset gets a new id, and changed content fails the pin.

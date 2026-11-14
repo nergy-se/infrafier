@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"os/user"
@@ -444,7 +445,7 @@ var defaultHTTP = &http.Client{
 // that also refuses to follow one to anything but https.
 func httpsRedirectsOnly(req *http.Request, via []*http.Request) error {
 	if req.URL.Scheme != "https" {
-		return fmt.Errorf("redirected to %s: only https URLs are fetched", req.URL.Redacted())
+		return fmt.Errorf("redirected to %s: only https URLs are fetched", redactURL(req.URL))
 	}
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
@@ -476,12 +477,20 @@ func (o *OS) Fetch(ctx context.Context, url string, header, secret http.Header) 
 	}
 	resp, err := c.Do(req)
 	if err != nil {
+		// A *url.Error names the request that failed, which after a
+		// redirect is a signed URL.
+		var ue *neturl.Error
+		if errors.As(err, &ue) {
+			if u, perr := neturl.Parse(ue.URL); perr == nil {
+				ue.URL = redactURL(u)
+			}
+		}
 		return nil, err
 	}
 	// Also for a client with its own redirect policy (tests).
 	if resp.Request.URL.Scheme != "https" {
 		resp.Body.Close()
-		return nil, fmt.Errorf("GET %s: redirected to %s: only https URLs are fetched", url, resp.Request.URL.Redacted())
+		return nil, fmt.Errorf("GET %s: redirected to %s: only https URLs are fetched", url, redactURL(resp.Request.URL))
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
@@ -506,17 +515,49 @@ func dropSecretsOffHost(c *http.Client, secret http.Header) *http.Client {
 		} else if len(via) >= 10 {
 			return errors.New("stopped after 10 redirects")
 		}
-		for _, r := range append(via[1:], req) {
-			if r.URL.Host != via[0].URL.Host {
-				for k := range secret {
-					req.Header.Del(k)
-				}
-				break
+		// Not append(via[1:], req): that could write into net/http's
+		// own slice of requests.
+		left := !sameHost(req.URL, via[0].URL)
+		for _, r := range via[1:] {
+			left = left || !sameHost(r.URL, via[0].URL)
+		}
+		if left {
+			for k := range secret {
+				req.Header.Del(k)
 			}
 		}
 		return nil
 	}
 	return &cc
+}
+
+// sameHost compares hosts as a server sees them: the name in any case, and
+// the port with the scheme's default filled in, so https://API.example.com:443
+// and https://api.example.com are the same host.
+func sameHost(a, b *neturl.URL) bool {
+	return strings.EqualFold(a.Hostname(), b.Hostname()) && effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(u *neturl.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	}
+	return ""
+}
+
+// redactURL is u without its userinfo, query and fragment, for errors: a
+// redirect's query is often a signature (a signed download URL), a
+// credential for as long as it is valid.
+func redactURL(u *neturl.URL) string {
+	r := *u
+	r.User, r.RawQuery, r.ForceQuery, r.Fragment, r.RawFragment = nil, "", false, "", ""
+	return r.String()
 }
 
 func (o *OS) Rename(oldpath, newpath string) error {

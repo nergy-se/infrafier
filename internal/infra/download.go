@@ -484,12 +484,13 @@ func keepPrevious(sys System, p string) error {
 // It returns the sha256 of each file to install: of the others, as an earlier
 // fetch recorded them in the manifest.
 func fetchDownload(ctx context.Context, sys System, d *Download, want map[string]bool) (map[string]string, error) {
+	if d.placeholders {
+		// Never send a placeholder as a credential. Checked first, so
+		// nothing is created for a fetch that is refused anyway.
+		return nil, fmt.Errorf("%s: rendered without this host's secrets, so its secretHeaders are placeholders; only a pull on the host fetches it", d.URL)
+	}
 	if err := ensureCacheDirs(sys); err != nil {
 		return nil, err
-	}
-	if d.placeholders {
-		// Never send a placeholder as a credential.
-		return nil, fmt.Errorf("%s: rendered without this host's secrets, so its secretHeaders are placeholders; only a pull on the host fetches it", d.URL)
 	}
 	var header http.Header
 	if len(d.Headers) > 0 {

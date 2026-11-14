@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -89,7 +91,20 @@ func TestDownloadHeaderErrors(t *testing.T) {
 		},
 		"set by infrafier": {
 			download: `headers: { host: 'example.com' }`,
-			want:     "Host is set by infrafier",
+			want:     "Host cannot be set by a download: it is set by infrafier",
+		},
+		"accept-encoding would fail the pin": {
+			download: `headers: { 'accept-encoding': 'gzip' }`,
+			want:     "Accept-Encoding cannot be set by a download",
+		},
+		"a range is no whole file": {
+			download: `headers: { Range: 'bytes=0-' }`,
+			want:     "Range cannot be set by a download",
+		},
+		"proxy credential would reach the server": {
+			download: `secretHeaders: { 'Proxy-Authorization': 'proxy-cred' }`,
+			secrets:  Secrets{"proxy-cred": "Basic s3cr3t"},
+			want:     "Proxy-Authorization cannot be set by a download: it would reach the server, not the proxy",
 		},
 		"twice across the two": {
 			download: `headers: { 'x-api-key': 'a' }, secretHeaders: { 'X-Api-Key': 'k' }`,
@@ -223,4 +238,58 @@ func TestDownloadWithPlaceholdersDoesNotFetch(t *testing.T) {
 	_, err := MakePlan(context.Background(), sys, []Resource{d})
 	assert.ErrorContains(t, err, "rendered without this host's secrets")
 	assert.Zero(t, srv.requests.Load())
+	assert.NoDirExists(t, filepath.Join(sys.Root, downloadCache), "refused before anything is created")
+}
+
+// The secret headers stay for a redirect to the same host however it is
+// written, and go for one to another host, or after one that went there.
+func TestDropSecretsOffHostComparesHostsAsAServerDoes(t *testing.T) {
+	c := dropSecretsOffHost(&http.Client{}, http.Header{"Authorization": {token}})
+	req := func(u string) *http.Request {
+		r, err := http.NewRequest(http.MethodGet, u, nil)
+		require.NoError(t, err)
+		r.Header.Set("Authorization", token)
+		return r
+	}
+	for name, tc := range map[string]struct {
+		via  []string
+		to   string
+		kept bool
+	}{
+		"same host, other case and default port": {[]string{"https://API.example.com:443/a"}, "https://api.example.com/b", true},
+		"same host, explicit default port":       {[]string{"https://api.example.com/a"}, "https://api.example.com:443/b", true},
+		"other port":                             {[]string{"https://api.example.com/a"}, "https://api.example.com:8443/b", false},
+		"other host":                             {[]string{"https://api.example.com/a"}, "https://cdn.example.net/b", false},
+		"back after another host":                {[]string{"https://api.example.com/a", "https://cdn.example.net/b"}, "https://api.example.com/c", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var via []*http.Request
+			for _, u := range tc.via {
+				via = append(via, req(u))
+			}
+			r := req(tc.to)
+			require.NoError(t, c.CheckRedirect(r, via))
+			assert.Equal(t, tc.kept, r.Header.Get("Authorization") != "")
+		})
+	}
+}
+
+// A redirect's URL is often signed, so an error after one shows it without
+// its query.
+func TestFetchErrorShowsNoSignedQuery(t *testing.T) {
+	sys, _ := newTestSystem(t)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://cdn.invalid/signed?sig=s3cr3t-sig", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	sys.HTTP = srv.Client()
+	_, err := sys.Fetch(context.Background(), srv.URL+"/a", nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https://cdn.invalid/signed")
+	assert.NotContains(t, err.Error(), "s3cr3t")
+
+	u, _ := neturl.Parse("https://user:pw@cdn.invalid/signed?X-Amz-Signature=s3cr3t#f")
+	assert.Equal(t, "https://cdn.invalid/signed", redactURL(u))
+	err = httpsRedirectsOnly(&http.Request{URL: &neturl.URL{Scheme: "http", Host: "cdn.invalid", Path: "/x", RawQuery: "sig=s3cr3t"}}, nil)
+	assert.EqualError(t, err, "redirected to http://cdn.invalid/x: only https URLs are fetched")
 }

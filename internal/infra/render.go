@@ -461,12 +461,37 @@ func (d *downloadSpec) resource(secrets SecretSource) (Resource, error) {
 // headerNameRe is an HTTP field name (RFC 9110 5.1, a token).
 var headerNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 
-// fetchOwnedHeaders are set by Fetch or by net/http itself.
-var fetchOwnedHeaders = map[string]bool{"Host": true, "User-Agent": true, "Connection": true, "Content-Length": true, "Transfer-Encoding": true}
+// refusedHeaders cannot be set by a download, with why. All of them pass
+// render and would only fail on the host, at the fetch.
+var refusedHeaders = map[string]string{
+	"Host":              "it is set by " + agentName + " from the URL",
+	"User-Agent":        "it is set by " + agentName,
+	"Connection":        "it is set by net/http",
+	"Content-Length":    "it is set by net/http",
+	"Transfer-Encoding": "it is set by net/http",
+	"Te":                "it is set by net/http",
+	"Expect":            "a GET has no body to continue",
+	// net/http only decompresses a response itself when it asked for
+	// gzip; with the header set the pin is checked against the
+	// compressed bytes and fails.
+	"Accept-Encoding": "net/http would then hand on a compressed body, which fails the pin",
+	// Fetch takes only a 200 with the whole file.
+	"Range":               "Fetch takes only a 200 with the whole file",
+	"If-Range":            "Fetch takes only a 200 with the whole file",
+	"If-Match":            "Fetch takes only a 200 with the whole file",
+	"If-None-Match":       "Fetch takes only a 200 with the whole file",
+	"If-Modified-Since":   "Fetch takes only a 200 with the whole file",
+	"If-Unmodified-Since": "Fetch takes only a 200 with the whole file",
+	// For an https URL net/http sends request headers to the origin
+	// inside the proxy's tunnel, so the proxy never sees it and the
+	// origin gets the proxy's credential. A proxy's credential goes in
+	// HTTPS_PROXY's userinfo.
+	"Proxy-Authorization": "it would reach the server, not the proxy; set the proxy's credential in HTTPS_PROXY",
+}
 
 // credentialHeaders carry credentials, so they may only be secretHeaders:
 // as headers they would be in golden files and in git.
-var credentialHeaders = map[string]bool{"Authorization": true, "Proxy-Authorization": true, "Cookie": true}
+var credentialHeaders = map[string]bool{"Authorization": true, "Cookie": true}
 
 // headers checks d's headers and secretHeaders and puts them in out, with
 // each secret's value read from secrets, or its placeholder when secrets is
@@ -479,8 +504,8 @@ func (d *downloadSpec) headers(out *Download, secrets SecretSource) error {
 			return "", fmt.Errorf("%s: %q is not a header name", field, h)
 		}
 		c := http.CanonicalHeaderKey(h)
-		if fetchOwnedHeaders[c] {
-			return "", fmt.Errorf("%s: %s is set by %s, not by a download", field, c, agentName)
+		if why, ok := refusedHeaders[c]; ok {
+			return "", fmt.Errorf("%s: %s cannot be set by a download: %s", field, c, why)
 		}
 		if seen[c] {
 			return "", fmt.Errorf("%s: %s is given twice (header names are case-insensitive, and one may be in headers and secretHeaders)", field, c)
